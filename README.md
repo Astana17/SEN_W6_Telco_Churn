@@ -182,3 +182,11 @@ python scripts/predict.py
 - `results/churn_pipeline.pkl`
 - `results/predictions.csv`
 - `results/results.md`
+
+```
+cd /Users/Guest/Desktop/SEN_W6_Telco_Churn
+python3 -m pip install -r requirements.txt
+python3 scripts/train.py
+python3 scripts/predict.py
+python3 -m notebook notebook/EDA.ipynb
+```
