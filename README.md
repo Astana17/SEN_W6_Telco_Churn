@@ -34,8 +34,14 @@ The EDA notebook investigates:
 - data shape and column types
 - distribution of `Churn` and numeric features
 - implicit and explicit missing values
-- cross-tabulation of churn against categorical variables like `Contract`, `PaymentMethod`, and `InternetService`
+- cross-tabulation of churn against categorical variables like `Contract`, `PaymentMethod`, and `InternetService`Щ
 - written business insights from the data
+
+**Observations**
+1. Dataset is imbalanced (~73% non-churn).
+2. Month-to-month contracts have the highest churn rate.
+3. Customers with low tenure churn more frequently.
+4. Electronic check users show increased churn risk.
 
 ### 2. Feature Engineering
 
