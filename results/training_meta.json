@@ -1,0 +1,8 @@
+{
+  "best_model": "Logistic Regression",
+  "threshold": 0.4971,
+  "test_precision": 0.5008,
+  "test_recall": 0.7995,
+  "test_f1": 0.6159,
+  "test_roc_auc": 0.841
+}

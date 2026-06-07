@@ -1,0 +1,26 @@
+{
+  "model_name": "Gradient Boosting",
+  "threshold": 0.2986,
+  "roc_auc": 0.8325,
+  "recall": 0.8021,
+  "precision": 0.4934,
+  "f1_churn": 0.611,
+  "accuracy": 0.7289,
+  "confusion_matrix": [
+    [
+      727,
+      308
+    ],
+    [
+      74,
+      300
+    ]
+  ],
+  "recall_target": 0.8,
+  "cv_recall_mean": 0.8625,
+  "cv_recall_std": 0.0134,
+  "cv_roc_auc_mean": 0.9224,
+  "cv_roc_auc_std": 0.004,
+  "cv_f1_mean": 0.8439,
+  "cv_f1_std": 0.0081
+}

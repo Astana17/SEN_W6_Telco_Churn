@@ -1,255 +1,342 @@
 """
-train.py
-─────────────────────────────────────────────────────────────────────────────
-Запуск:
+Train churn models with a leakage-free sklearn Pipeline.
+
+Usage:
     python scripts/train.py
-    python scripts/train.py --model rf
-    python scripts/train.py --model all --recall_target 0.80
-
-Читает из data/processed/:
-    X_train.csv, y_train.csv, X_test.csv, y_test.csv
-
-Сохраняет в results/:
-    lr_model.pkl / rf_model.pkl / gb_model.pkl
-    lr_meta.json / rf_meta.json / gb_meta.json
-    comparison.csv
-    pr_curve_*.png
-    feat_imp_*.png
-─────────────────────────────────────────────────────────────────────────────
 """
 
-import argparse
 import json
 import os
-import pickle
-import warnings
+import sys
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from joblib import dump
+from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    classification_report,
     confusion_matrix,
+    f1_score,
     precision_recall_curve,
+    precision_score,
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import (
+    GridSearchCV,
+    StratifiedKFold,
+    cross_val_predict,
+    cross_validate,
+    train_test_split,
+)
 
-warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from preprocessing import ThresholdClassifier, build_model_pipeline
 
-
-# ─── загрузка ─────────────────────────────────────────────────────────────────
-
-def load_data(data_dir: str):
-    X_train = pd.read_csv(os.path.join(data_dir, "X_train.csv"))
-    X_test  = pd.read_csv(os.path.join(data_dir, "X_test.csv"))
-    y_train = pd.read_csv(os.path.join(data_dir, "y_train.csv")).squeeze()
-    y_test  = pd.read_csv(os.path.join(data_dir, "y_test.csv")).squeeze()
-    print(f"[train] X_train={X_train.shape}  X_test={X_test.shape}")
-    return X_train, X_test, y_train, y_test
-
-
-# ─── модели ───────────────────────────────────────────────────────────────────
-
-def get_models() -> dict:
-    return {
-        "lr": LogisticRegression(
-            max_iter=1000,
-            class_weight="balanced",
-            random_state=42,
-        ),
-        "rf": RandomForestClassifier(
-            n_estimators=300,
-            min_samples_leaf=5,
-            class_weight="balanced",
-            n_jobs=-1,
-            random_state=42,
-        ),
-        "gb": GradientBoostingClassifier(
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=4,
-            subsample=0.8,
-            min_samples_leaf=10,
-            random_state=42,
-        ),
-    }
-
-MODEL_NAMES = {"lr": "Logistic Regression", "rf": "Random Forest", "gb": "Gradient Boosting"}
+DATA_PATH = os.path.join("data", "WA_Fn-UseC_-Telco-Customer-Churn.csv")
+MODEL_PATH = os.path.join("results", "churn_pipeline.pkl")
+RESULTS_PATH = os.path.join("results", "results.md")
+PLOTS_DIR = os.path.join("results", "plots")
+CV_RESULTS_PATH = os.path.join("results", "cv_results.csv")
+RANDOM_STATE = 42
+RECALL_TARGET = 0.80
+CV_FOLDS = 5
 
 
-# ─── порог ────────────────────────────────────────────────────────────────────
-
-def find_threshold(y_true, y_prob, recall_target: float) -> float:
-    """
-    Ищет наименьший порог при котором recall >= recall_target,
-    среди таких кандидатов выбирает максимальный F1.
-    Если ни один не даёт нужного recall — просто максимизирует F1.
-    """
-    precision_arr, recall_arr, thresholds = precision_recall_curve(y_true, y_prob)
-    # последний элемент precision/recall не имеет порога
-    p, r, t = precision_arr[:-1], recall_arr[:-1], thresholds
-    f1 = 2 * p * r / (p + r + 1e-9)
-
-    mask = r >= recall_target
-    idx  = np.argmax(f1[mask]) if mask.any() else np.argmax(f1)
-    return float(t[mask][idx] if mask.any() else t[idx])
+def load_data(path):
+    df = pd.read_csv(path)
+    X = df.drop(columns=["Churn"])
+    y = (df["Churn"] == "Yes").astype(int)
+    return X, y
 
 
-# ─── кросс-валидация ──────────────────────────────────────────────────────────
+def choose_threshold(y_true, y_probs, min_recall=0.80):
+    precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
+    candidates = [
+        (thr, prec, rec)
+        for thr, prec, rec in zip(thresholds, precision[:-1], recall[:-1])
+        if rec >= min_recall
+    ]
+    if candidates:
+        return max(candidates, key=lambda item: item[1])[0]
+    return max(
+        zip(thresholds, precision[:-1], recall[:-1]),
+        key=lambda item: item[1] * item[2],
+    )[0]
 
-def run_cv(model, X, y, n_splits: int, seed: int) -> dict:
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    out = {}
-    for metric in ("recall", "roc_auc", "f1"):
-        scores = cross_val_score(model, X, y, cv=cv, scoring=metric, n_jobs=-1)
-        out[f"cv_{metric}_mean"] = round(float(scores.mean()), 4)
-        out[f"cv_{metric}_std"]  = round(float(scores.std()),  4)
-    print(f"[train] CV  recall={out['cv_recall_mean']:.4f}±{out['cv_recall_std']:.4f}  "
-          f"auc={out['cv_roc_auc_mean']:.4f}±{out['cv_roc_auc_std']:.4f}")
-    return out
 
-
-# ─── обучение + оценка ────────────────────────────────────────────────────────
-
-def fit_and_evaluate(model, X_train, y_train, X_test, y_test,
-                     name: str, recall_target: float, out_dir: str) -> dict:
-    model.fit(X_train, y_train)
-    y_prob = model.predict_proba(X_test)[:, 1]
-
-    threshold = find_threshold(y_test, y_prob, recall_target)
-    y_pred    = (y_prob >= threshold).astype(int)
-
-    auc    = roc_auc_score(y_test, y_prob)
-    recall = recall_score(y_test, y_pred)
-    report = classification_report(
-        y_test, y_pred, target_names=["No Churn", "Churn"], output_dict=True
+def run_cross_validation(pipeline, X, y, model_name):
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    scoring = ["recall", "precision", "f1", "roc_auc"]
+    scores = cross_validate(
+        pipeline,
+        X,
+        y,
+        cv=cv,
+        scoring=scoring,
+        n_jobs=-1,
+        return_train_score=False,
     )
-    cm = confusion_matrix(y_test, y_pred).tolist()
+    row = {"model": model_name}
+    for metric in scoring:
+        row[f"{metric}_mean"] = round(scores[f"test_{metric}"].mean(), 4)
+        row[f"{metric}_std"] = round(scores[f"test_{metric}"].std(), 4)
+    return row
 
-    print(f"\n{'─'*54}")
-    print(f"  {name}   порог={threshold:.3f}")
-    print(f"{'─'*54}")
-    print(classification_report(y_test, y_pred, target_names=["No Churn", "Churn"]))
-    print(f"Confusion matrix:\n{np.array(cm)}")
-    print(f"ROC-AUC: {auc:.4f}   Recall: {recall:.4f}")
 
-    _save_pr_curve(y_test, y_prob, threshold, name, out_dir)
-
+def get_candidate_pipelines():
     return {
-        "model_name":       name,
-        "threshold":        round(threshold, 4),
-        "roc_auc":          round(auc, 4),
-        "recall":           round(recall, 4),
-        "precision":        round(report["Churn"]["precision"], 4),
-        "f1_churn":         round(report["Churn"]["f1-score"], 4),
-        "accuracy":         round(report["accuracy"], 4),
-        "confusion_matrix": cm,
-        "recall_target":    recall_target,
+        "Dummy (most_frequent)": build_model_pipeline(
+            DummyClassifier(strategy="most_frequent")
+        ),
+        "Dummy (stratified)": build_model_pipeline(
+            DummyClassifier(strategy="stratified", random_state=RANDOM_STATE)
+        ),
+        "Logistic Regression": build_model_pipeline(
+            LogisticRegression(
+                class_weight="balanced",
+                max_iter=1000,
+                random_state=RANDOM_STATE,
+            )
+        ),
+        "Random Forest": build_model_pipeline(
+            RandomForestClassifier(
+                n_estimators=300,
+                class_weight="balanced",
+                random_state=RANDOM_STATE,
+                n_jobs=-1,
+            )
+        ),
+        "Gradient Boosting": build_model_pipeline(
+            GradientBoostingClassifier(random_state=RANDOM_STATE)
+        ),
     }
 
 
-# ─── графики ──────────────────────────────────────────────────────────────────
+def get_param_grid(model_name):
+    if model_name == "Logistic Regression":
+        return {
+            "model__C": [0.1, 1.0, 10.0],
+            "model__solver": ["lbfgs", "liblinear"],
+        }
+    if model_name == "Random Forest":
+        return {
+            "model__n_estimators": [200, 300],
+            "model__max_depth": [8, 12, None],
+            "model__min_samples_leaf": [1, 5],
+        }
+    if model_name == "Gradient Boosting":
+        return {
+            "model__n_estimators": [100, 200],
+            "model__learning_rate": [0.05, 0.1],
+            "model__max_depth": [3, 4],
+        }
+    return None
 
-def _save_pr_curve(y_true, y_prob, threshold, name, out_dir):
-    prec, rec, thr = precision_recall_curve(y_true, y_prob)
-    idx = np.argmin(np.abs(thr - threshold)) if len(thr) else 0
 
-    plt.figure(figsize=(6, 4))
-    plt.plot(rec, prec, lw=1.5)
-    plt.scatter(rec[idx], prec[idx], color="red", zorder=5,
-                label=f"порог={threshold:.2f}")
+def save_pr_curve(y_true, y_probs, threshold, output_path):
+    precision, recall, _ = precision_recall_curve(y_true, y_probs)
+    plt.figure(figsize=(7, 5))
+    plt.plot(recall, precision, linewidth=2)
+    plt.axvline(RECALL_TARGET, color="gray", linestyle="--", label=f"recall target={RECALL_TARGET}")
+    plt.scatter(
+        [recall_score(y_true, (y_probs >= threshold).astype(int))],
+        [precision_score(y_true, (y_probs >= threshold).astype(int), zero_division=0)],
+        color="red",
+        zorder=5,
+        label=f"threshold={threshold:.3f}",
+    )
     plt.xlabel("Recall")
     plt.ylabel("Precision")
-    plt.title(f"PR-кривая: {name}")
+    plt.title("Precision-Recall curve (out-of-fold validation)")
     plt.legend()
     plt.tight_layout()
-    slug = name.lower().replace(" ", "_")
-    plt.savefig(os.path.join(out_dir, f"pr_{slug}.png"), dpi=120)
+    plt.savefig(output_path, dpi=120)
     plt.close()
 
 
-def save_feat_importance(model, feature_names, name, out_dir):
-    if not hasattr(model, "feature_importances_"):
-        return
-    imp = pd.Series(model.feature_importances_, index=feature_names).sort_values()
-    plt.figure(figsize=(7, 5))
-    imp.tail(15).plot(kind="barh", color="steelblue")
-    plt.title(f"Feature importance — {name}")
-    plt.tight_layout()
-    slug = name.lower().replace(" ", "_")
-    plt.savefig(os.path.join(out_dir, f"feat_imp_{slug}.png"), dpi=120)
-    plt.close()
-    print(f"[train] топ-5 признаков:\n{imp.tail(5).iloc[::-1].to_string()}")
+def format_confusion_matrix(y_true, y_pred):
+    matrix = confusion_matrix(y_true, y_pred)
+    return pd.DataFrame(
+        matrix,
+        index=["Actual No Churn", "Actual Churn"],
+        columns=["Predicted No Churn", "Predicted Churn"],
+    )
 
 
-# ─── сохранение модели ────────────────────────────────────────────────────────
+def write_results_md(
+    best_model_name,
+    threshold,
+    precision,
+    recall,
+    f1,
+    roc_auc,
+    cm_df,
+    n_test,
+    n_flagged,
+    n_true_churners_flagged,
+):
+    flagged_rate = n_flagged / n_test
+    precision_among_flagged = n_true_churners_flagged / n_flagged if n_flagged else 0.0
 
-def save_model(model, meta: dict, key: str, out_dir: str):
-    with open(os.path.join(out_dir, f"{key}_model.pkl"), "wb") as f:
-        pickle.dump(model, f)
-    with open(os.path.join(out_dir, f"{key}_meta.json"), "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"[train] сохранено: {key}_model.pkl  {key}_meta.json")
+    with open(RESULTS_PATH, "w", encoding="utf-8") as out:
+        out.write("# Training results\n\n")
+        out.write(f"- best model: {best_model_name}\n")
+        out.write(f"- frozen threshold: {threshold:.4f}\n")
+        out.write(f"- test precision (churn): {precision:.4f}\n")
+        out.write(f"- test recall (churn): {recall:.4f}\n")
+        out.write(f"- test f1 (churn): {f1:.4f}\n")
+        out.write(f"- test roc_auc: {roc_auc:.4f}\n\n")
 
+        out.write("## Confusion matrix (test set)\n\n")
+        out.write("| | Predicted No Churn | Predicted Churn |\n")
+        out.write("|---|---|---|\n")
+        out.write(
+            f"| Actual No Churn | {cm_df.iloc[0, 0]} | {cm_df.iloc[0, 1]} |\n"
+        )
+        out.write(
+            f"| Actual Churn | {cm_df.iloc[1, 0]} | {cm_df.iloc[1, 1]} |\n\n"
+        )
 
-# ─── main ─────────────────────────────────────────────────────────────────────
+        out.write("## Business interpretation\n\n")
+        out.write(
+            f"At threshold **{threshold:.2f}**, the model flags about "
+            f"**{flagged_rate * 1000:.0f} customers per 1,000**, "
+            f"of whom roughly **{precision_among_flagged * 100:.0f}%** are real churners. "
+            f"On the held-out test sample ({n_test:,} customers), that means "
+            f"**{n_flagged:,} marketing calls**, catching **{n_true_churners_flagged:,}** "
+            f"actual churners while missing the rest.\n\n"
+        )
+        out.write(
+            "Because a missed churner costs about 5x more than calling a loyal customer, "
+            "we prioritised recall on validation data and then chose the highest precision "
+            f"among thresholds with recall >= {RECALL_TARGET:.2f}.\n"
+        )
+
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data",          default="data/processed/")
-    parser.add_argument("--output",        default="results/")
-    parser.add_argument("--model",         default="all",
-                        choices=["lr", "rf", "gb", "all"])
-    parser.add_argument("--recall_target", type=float, default=0.80)
-    parser.add_argument("--cv_folds",      type=int,   default=5)
-    parser.add_argument("--seed",          type=int,   default=42)
-    args = parser.parse_args()
+    os.makedirs("results", exist_ok=True)
+    os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    os.makedirs(args.output, exist_ok=True)
+    X, y = load_data(DATA_PATH)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=RANDOM_STATE,
+        stratify=y,
+    )
 
-    X_train, X_test, y_train, y_test = load_data(args.data)
-    feature_names = list(X_train.columns)
-    all_models    = get_models()
-    keys          = list(all_models) if args.model == "all" else [args.model]
+    print(f"[train] train={len(X_train):,}  test={len(X_test):,}")
+    print(f"[train] churn rate train={y_train.mean():.3f}  test={y_test.mean():.3f}")
 
-    all_meta = []
-    for key in keys:
-        model = all_models[key]
-        name  = MODEL_NAMES[key]
+    cv_rows = []
+    pipelines = get_candidate_pipelines()
+    for name, pipeline in pipelines.items():
+        print(f"[train] CV: {name}")
+        cv_rows.append(run_cross_validation(pipeline, X_train, y_train, name))
 
-        print(f"\n{'═'*54}")
-        print(f"  {name}")
-        print(f"{'═'*54}")
+    cv_df = pd.DataFrame(cv_rows)
+    cv_df.to_csv(CV_RESULTS_PATH, index=False)
+    print(f"\n[train] CV results saved to {CV_RESULTS_PATH}")
+    print(cv_df.to_string(index=False))
 
-        cv_scores = run_cv(model, X_train, y_train, args.cv_folds, args.seed)
+    model_candidates = [
+        name
+        for name in pipelines
+        if not name.startswith("Dummy")
+    ]
+    best_row = cv_df[cv_df["model"].isin(model_candidates)].sort_values(
+        ["recall_mean", "roc_auc_mean"], ascending=False
+    ).iloc[0]
+    best_model_name = best_row["model"]
+    print(f"\n[train] best model by CV recall: {best_model_name}")
 
-        meta = fit_and_evaluate(
-            model, X_train, y_train, X_test, y_test,
-            name=name,
-            recall_target=args.recall_target,
-            out_dir=args.output,
+    tuned_pipeline = pipelines[best_model_name]
+    param_grid = get_param_grid(best_model_name)
+    if param_grid:
+        search = GridSearchCV(
+            tuned_pipeline,
+            param_grid=param_grid,
+            scoring="recall",
+            cv=StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE),
+            n_jobs=-1,
         )
-        meta.update(cv_scores)
+        search.fit(X_train, y_train)
+        tuned_pipeline = search.best_estimator_
+        print(f"[train] GridSearch best params: {search.best_params_}")
+        print(f"[train] GridSearch best CV recall: {search.best_score_:.4f}")
 
-        save_feat_importance(model, feature_names, name, args.output)
-        save_model(model, meta, key, args.output)
-        all_meta.append(meta)
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    train_probs = cross_val_predict(
+        tuned_pipeline,
+        X_train,
+        y_train,
+        cv=cv,
+        method="predict_proba",
+        n_jobs=-1,
+    )[:, 1]
 
-    # сводная таблица
-    cols = ["model_name", "roc_auc", "recall", "precision",
-            "f1_churn", "accuracy", "threshold",
-            "cv_recall_mean", "cv_roc_auc_mean"]
-    comparison = pd.DataFrame(all_meta)[cols]
-    comparison.to_csv(os.path.join(args.output, "comparison.csv"), index=False)
-    print(f"\n[train] сравнение моделей:\n{comparison.to_string(index=False)}")
+    threshold = choose_threshold(y_train, train_probs, min_recall=RECALL_TARGET)
+    print(f"[train] frozen threshold from OOF validation: {threshold:.4f}")
 
-    best = max(all_meta, key=lambda m: m["roc_auc"])
-    print(f"\n[train] ✓ лучшая по AUC: {best['model_name']}  "
-          f"AUC={best['roc_auc']}  Recall={best['recall']}")
+    save_pr_curve(
+        y_train,
+        train_probs,
+        threshold,
+        os.path.join(PLOTS_DIR, "precision_recall_curve.png"),
+    )
+
+    tuned_pipeline.fit(X_train, y_train)
+    test_probs = tuned_pipeline.predict_proba(X_test)[:, 1]
+    y_pred = (test_probs >= threshold).astype(int)
+
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    roc_auc = roc_auc_score(y_test, test_probs)
+    cm_df = format_confusion_matrix(y_test, y_pred)
+
+    print("\n[train] final test evaluation (single pass)")
+    print(f"precision={precision:.4f}  recall={recall:.4f}  f1={f1:.4f}  roc_auc={roc_auc:.4f}")
+    print(cm_df)
+
+    n_flagged = int(y_pred.sum())
+    n_true_churners_flagged = int(((y_pred == 1) & (y_test == 1)).sum())
+
+    write_results_md(
+        best_model_name,
+        threshold,
+        precision,
+        recall,
+        f1,
+        roc_auc,
+        cm_df,
+        len(X_test),
+        n_flagged,
+        n_true_churners_flagged,
+    )
+
+    cm_df.to_csv(os.path.join("results", "confusion_matrix.csv"))
+    final_model = ThresholdClassifier(estimator=tuned_pipeline, threshold=threshold)
+    dump(final_model, MODEL_PATH)
+
+    meta = {
+        "best_model": best_model_name,
+        "threshold": round(threshold, 4),
+        "test_precision": round(precision, 4),
+        "test_recall": round(recall, 4),
+        "test_f1": round(f1, 4),
+        "test_roc_auc": round(roc_auc, 4),
+    }
+    with open(os.path.join("results", "training_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"\n[train] saved model to {MODEL_PATH}")
+    print(f"[train] saved results to {RESULTS_PATH}")
 
 
 if __name__ == "__main__":

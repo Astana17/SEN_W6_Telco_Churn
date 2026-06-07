@@ -1,0 +1,4 @@
+model_name,roc_auc,recall,precision,f1_churn,accuracy,threshold,cv_recall_mean,cv_roc_auc_mean
+Logistic Regression,0.8335,0.8102,0.5058,0.6228,0.7395,0.3517,0.8386,0.9182
+Random Forest,0.8331,0.8021,0.5042,0.6192,0.7381,0.3748,0.8688,0.9186
+Gradient Boosting,0.8325,0.8021,0.4934,0.611,0.7289,0.2986,0.8625,0.9224

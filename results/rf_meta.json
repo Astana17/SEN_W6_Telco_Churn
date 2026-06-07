@@ -1,0 +1,26 @@
+{
+  "model_name": "Random Forest",
+  "threshold": 0.3748,
+  "roc_auc": 0.8331,
+  "recall": 0.8021,
+  "precision": 0.5042,
+  "f1_churn": 0.6192,
+  "accuracy": 0.7381,
+  "confusion_matrix": [
+    [
+      740,
+      295
+    ],
+    [
+      74,
+      300
+    ]
+  ],
+  "recall_target": 0.8,
+  "cv_recall_mean": 0.8688,
+  "cv_recall_std": 0.0152,
+  "cv_roc_auc_mean": 0.9186,
+  "cv_roc_auc_std": 0.0041,
+  "cv_f1_mean": 0.8451,
+  "cv_f1_std": 0.0086
+}

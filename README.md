@@ -2,199 +2,139 @@
 
 ## Overview
 
-This project builds a churn prediction model for a telecom operator using the IBM Telco Customer Churn dataset. The goal is to identify customers who are likely to cancel service so the marketing team can proactively call at-risk customers.
+This project builds a churn prediction model for a telecom operator using the IBM Telco Customer Churn dataset. The marketing team needs to know which customers are likely to cancel before they leave.
 
-The business requirement is asymmetric: a missed churner is worth about **5× more** than a false alarm. Therefore the model must prioritize recall for the churn class while still preserving useful precision.
+A missed churner (false negative) is roughly **5× more expensive** than calling a loyal customer (false positive). The model therefore prioritises **recall** for the churn class, while still keeping precision usable for outbound calls.
 
 ## Dataset
 
 - Source: IBM Telco Customer Churn dataset
-- Rows: ~7,000 customers
-- Columns: 21 features plus `Churn` target
-- Target: `Churn` (`Yes` / `No`) → binary 1/0
+- Rows: 7,043 customers
+- Target: `Churn` (`Yes` / `No` → 1 / 0)
+- Class balance: ~73% non-churn, ~27% churn
 
-Important note: `TotalCharges` appears numeric but loads as `object` because some rows contain empty strings. These must be converted with `pd.to_numeric(..., errors='coerce')` and imputed inside the pipeline.
+`TotalCharges` loads as `object` because some rows contain empty strings. These are converted with `pd.to_numeric(..., errors='coerce')` and imputed inside the sklearn pipeline.
 
-## Business Problem
+## Why not accuracy?
 
-The CMO believes customers are leaving and wants the marketing team to know which customers are at risk. The model must:
+A `DummyClassifier(strategy='most_frequent')` already reaches about **73% accuracy** by always predicting "No Churn". That baseline is useless for finding churners, so accuracy is not used as the main metric. Instead we track recall, precision, F1, and ROC-AUC for the churn class.
 
-- predict churn probability for each customer
-- use a threshold chosen on validation data only
-- apply a higher cost to false negatives than false positives
-- deliver a final recall target of at least 0.75 on the held-out test set
-- deliver a precision target of at least 0.45 on the held-out test set
+## Feature engineering (inside Pipeline)
 
-## Approach
+All feature engineering lives in a custom `FeatureEngineer` transformer so training and inference stay identical.
 
-### 1. Exploratory Data Analysis (EDA)
+| Feature | Justification |
+|---|---|
+| `tenure_bucket` | Groups customers into tenure stages (0–12, 13–24, 25–48, 49+ months). Short-tenure customers churn much more often than long-tenure customers. |
+| `charges_per_month_of_tenure` | `TotalCharges / max(tenure, 1)`. Captures average spend rate and helps separate new low-spend churners from stable long-term customers. |
+| `n_services` | Count of active services. A service counts as active when its value is neither `No`, `No internet service`, nor `No phone service`. This correctly treats DSL/Fiber as active internet and avoids the naive `== "Yes"` trap on `InternetService`. |
 
-The EDA notebook investigates:
+## Pipeline architecture
 
-- data shape and column types
-- distribution of `Churn` and numeric features
-- implicit and explicit missing values
-- cross-tabulation of churn against categorical variables like `Contract`, `PaymentMethod`, and `InternetService`Щ
-- written business insights from the data
+A single leakage-free sklearn `Pipeline`:
 
-**Observations**
-1. Dataset is imbalanced (~73% non-churn).
-2. Month-to-month contracts have the highest churn rate.
-3. Customers with low tenure churn more frequently.
-4. Electronic check users show increased churn risk.
+1. `FeatureEngineer` — derived features
+2. `ColumnTransformer` — numeric imputation + scaling, categorical one-hot encoding
+3. Classifier — Logistic Regression / Random Forest / Gradient Boosting
 
-### 2. Feature Engineering
+All fitting happens inside cross-validation folds or on the training split only.
 
-Feature engineering happens inside the scikit-learn pipeline to avoid leakage. At least two derived features should be created, such as:
+## Model selection
 
-- `tenure_bucket` — binned customer tenure groups
-- `charges_per_month_of_tenure` — ratio of `TotalCharges` to tenure
-- `n_services` — count of active services, including DSL/Fiber and add-ons
+- **Split:** 80% train / 20% test, stratified, `random_state=42`
+- **Baselines:** `DummyClassifier` (`most_frequent`, `stratified`)
+- **Candidates:** Logistic Regression (`class_weight='balanced'`), Random Forest, Gradient Boosting
+- **CV:** 5-fold stratified cross-validation
+- **Tuning:** `GridSearchCV` on the best model (`scoring='recall'`), wrapping the full pipeline
 
-### 3. Leakage-Free Pipeline
+### Cross-validation results (mean ± std)
 
-The model uses a single `Pipeline` with a `ColumnTransformer` for preprocessing and a classifier at the end.
+| Model | Recall | Precision | F1 | ROC-AUC |
+|---|---|---|---|---|
+| Dummy (most_frequent) | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.500 ± 0.000 |
+| Dummy (stratified) | 0.278 ± 0.025 | 0.275 ± 0.025 | 0.276 ± 0.025 | 0.507 ± 0.017 |
+| **Logistic Regression** | **0.797 ± 0.035** | **0.518 ± 0.016** | **0.628 ± 0.021** | **0.846 ± 0.011** |
+| Random Forest | 0.464 ± 0.031 | 0.640 ± 0.033 | 0.538 ± 0.030 | 0.828 ± 0.011 |
+| Gradient Boosting | 0.522 ± 0.025 | 0.662 ± 0.036 | 0.583 ± 0.026 | 0.848 ± 0.011 |
 
-Preprocessing includes:
+All three candidate models beat both dummy baselines on recall and ROC-AUC.
 
-- numeric imputation for missing values
-- scaling numeric features with `StandardScaler`
-- one-hot encoding categorical features with `OneHotEncoder(handle_unknown='ignore')`
-- feature construction via a custom transformer or `FunctionTransformer`
+**Best model:** Logistic Regression after `GridSearchCV` (`C=10`, `solver=liblinear`).
 
-All transformers are fit only on training data inside the pipeline.
+## Threshold tuning
 
-### 4. Model Selection
+The default 0.5 cutoff is not a business decision. Out-of-fold churn probabilities were generated on the training set with `cross_val_predict(..., method='predict_proba')`. The precision-recall curve was used to pick the threshold with **recall ≥ 0.80** and the **highest precision**.
 
-The training process follows a strict train/test split:
+- **Frozen threshold:** 0.4971 (chosen on validation only, never on the test set)
 
-- 80% training, 20% test
-- stratified split by `Churn`
-- test set touched only once at the end
+## Final test results (single evaluation)
 
-Baseline models:
+| Metric | Value |
+|---|---|
+| Recall (churn) | **0.7995** |
+| Precision (churn) | **0.5008** |
+| F1 (churn) | 0.6159 |
+| ROC-AUC | 0.8410 |
 
-- `DummyClassifier(strategy='most_frequent')`
-- `DummyClassifier(strategy='stratified')`
+### Confusion matrix (test set)
 
-Candidate classifiers:
+| | Predicted No Churn | Predicted Churn |
+|---|---|---|
+| Actual No Churn | 737 | 298 |
+| Actual Churn | 75 | 299 |
 
-- Logistic Regression with `class_weight='balanced'`
-- Random Forest
-- Gradient Boosting (`GradientBoostingClassifier`)
+Business summary is in `results/results.md`.
 
-Evaluation:
-
-- 5-fold stratified cross-validation
-- metrics: recall, precision, F1, ROC-AUC for churn class
-- report mean and standard deviation across folds
-
-### 5. Threshold Tuning
-
-The decision threshold is tuned on validation/out-of-fold probabilities only.
-
-- generate out-of-fold churn probabilities using `cross_val_predict(..., method='predict_proba')`
-- plot precision-recall curve
-- choose a threshold with recall ≥ 0.80 and the highest possible precision
-- freeze that threshold before testing
-
-### 6. Final Evaluation
-
-The chosen model is evaluated once on the held-out test set with the frozen threshold.
-
-Expected business-level results in the README:
-
-- test-set recall ≥ 0.75 for churn
-- test-set precision ≥ 0.45 for churn
-
-A confusion matrix is displayed as a labeled DataFrame.
-
-### 7. Inference
-
-The final pipeline is serialized to `results/churn_pipeline.pkl`.
-
-Prediction workflow:
-
-- load `data/new_customers.csv` (5 rows with `Churn` removed)
-- preserve `customerID` separately
-- drop `customerID` before prediction
-- output `results/predictions.csv` with columns `customerID, churn_pred, churn_proba`
-
-## Repository Structure
-
-Expected repository layout:
+## Repository structure
 
 ```
 project
 │   README.md
 │   requirements.txt
 │
-└───data
-│   │   WA_Fn-UseC_-Telco-Customer-Churn.csv
-│   │   new_customers.csv
+├── data
+│   ├── WA_Fn-UseC_-Telco-Customer-Churn.csv
+│   └── new_customers.csv
 │
-└───notebook
-│   │   EDA.ipynb
+├── notebook
+│   └── EDA.ipynb
 │
-└───scripts
-│   │   preprocessing.py
-│   │   train.py
-│   │   predict.py
+├── scripts
+│   ├── preprocessing.py
+│   ├── train.py
+│   └── predict.py
 │
-└───results
-    │   plots
-    │   predictions.csv
-    │   churn_pipeline.pkl
-    │   results.md
+└── results
+    ├── plots/
+    ├── predictions.csv
+    ├── churn_pipeline.pkl
+    └── results.md
 ```
 
 ## Running the project
 
-1. Install dependencies:
-
 ```bash
 pip install -r requirements.txt
-```
-
-2. Train the model:
-
-```bash
 python scripts/train.py
+python scripts/predict.py
 ```
 
-3. Predict on new customers:
+Or with Make:
 
 ```bash
-python scripts/predict.py
-
-python scripts/predict.py --test_mode )(так как я делала сплит по stratify y)
+make setup
 ```
-
-## Notes
-
-- Accuracy is not a valid evaluation metric for this imbalanced problem; the majority-class baseline is ~73%.
-- All preprocessing and feature engineering must be implemented inside the pipeline to avoid leakage.
-- The test set must remain untouched until the final evaluation.
-- The threshold decision must be based on validation data only.
 
 ## Deliverables
 
-- `README.md`
+- `README.md` — this file
 - `requirements.txt`
 - `data/WA_Fn-UseC_-Telco-Customer-Churn.csv`
-- `data/new_customers.csv`
+- `data/new_customers.csv` — 5 rows from raw data, `Churn` removed
 - `notebook/EDA.ipynb`
-- `scripts/preprocessing.py`
+- `scripts/preprocessing.py` — custom transformers
 - `scripts/train.py`
 - `scripts/predict.py`
 - `results/churn_pipeline.pkl`
-- `results/predictions.csv`
+- `results/predictions.csv` — columns `customerID`, `churn_pred`, `churn_proba`
 - `results/results.md`
-
-```
-cd /Users/Guest/Desktop/SEN_W6_Telco_Churn
-python3 -m pip install -r requirements.txt
-python3 scripts/train.py
-python3 scripts/predict.py
-python3 -m notebook notebook/EDA.ipynb
-```
