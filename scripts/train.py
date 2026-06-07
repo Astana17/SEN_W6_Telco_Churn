@@ -28,6 +28,7 @@ from sklearn.metrics import (
     confusion_matrix,
     precision_recall_curve,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import (
     GridSearchCV,
@@ -310,6 +311,21 @@ test_probas = tuned_pipeline.predict_proba(X_test)[:, 1]
 y_pred = (test_probas >= chosen_threshold).astype(int)
 
 test_auc = roc_auc_score(y_test, test_probas)
+
+# ROC-AUC curve
+fpr, tpr, _ = roc_curve(y_test, test_probas)
+fig, ax = plt.subplots(figsize=(7, 6))
+ax.plot(fpr, tpr, lw=2, color='steelblue', label=f'LogisticRegression (AUC = {test_auc:.3f})')
+ax.plot([0, 1], [0, 1], lw=1, color='gray', linestyle='--', label='Случайное угадывание (AUC = 0.500)')
+ax.set_xlabel('False Positive Rate (1 — Specificity)')
+ax.set_ylabel('True Positive Rate (Recall)')
+ax.set_title('ROC-AUC кривая — тестовая выборка')
+ax.legend(loc='lower right')
+ax.grid(True, alpha=0.3)
+roc_path = PLOTS_DIR / 'roc_curve.png'
+fig.savefig(roc_path, dpi=120, bbox_inches='tight')
+plt.close(fig)
+print(f"  ROC curve saved → {roc_path}")
 
 print(f"\n  Test ROC-AUC : {test_auc:.4f}")
 print(f"  Threshold    : {chosen_threshold:.4f}")
