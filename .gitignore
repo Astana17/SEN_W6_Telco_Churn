@@ -1,28 +1,20 @@
-cat > .gitignore << 'EOF'
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
-.venv/
+.env
 venv/
-*.egg-info/
+.venv/
+env/
 
-# Data & Models (тяжёлые файлы — не коммитим)
-data/processed/
-results/
-models/
-*.pkl
-*.joblib
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (large files)
+#data/WA_Fn-UseC_-Telco-Customer-Churn.csv
+
+# Model artifacts
+results/churn_pipeline.pkl
 
 # OS
 .DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-EOF

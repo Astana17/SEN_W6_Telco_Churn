@@ -1,8 +1,8 @@
 pandas>=1.5
-numpy>=1.24
+numpy>=1.23
 scikit-learn>=1.2
-joblib>=1.3
-matplotlib>=3.7
-jupyter
-seaborn
-imblearn
+matplotlib>=3.6
+seaborn>=0.12
+joblib>=1.2
+jupyter>=1.0
+ipykernel>=6.0
