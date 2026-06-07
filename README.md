@@ -1,124 +1,119 @@
-# Telco Customer Churn Prediction
+# Предсказание оттока клиентов телеком-оператора
 
-A complete end-to-end machine learning project that predicts which customers are likely to cancel their subscription, using the IBM Telco Customer Churn dataset (~7 000 customers, 20 features).
+Проект по машинному обучению: предсказываем, какие клиенты собираются уйти, чтобы отдел удержания мог позвонить им заранее.
 
----
-
-## Project Overview
-
-Telecoms lose significant revenue to churn. Proactively identifying at-risk customers lets retention teams make targeted offers before the customer leaves. This project builds a **recall-optimised binary classifier** (churn = 1) wrapped in a sklearn `Pipeline` so that new customer records can be scored in a single `pipeline.predict_proba()` call.
+Датасет: IBM Telco Customer Churn (~7 000 клиентов, 20 признаков).
 
 ---
 
-## Directory Structure
+## Структура проекта
 
 ```
 telco_churn/
 ├── data/
-│   ├── WA_Fn-UseC_-Telco-Customer-Churn.csv   # training data
-│   └── new_customers.csv                        # scoring sample
+│   ├── WA_Fn-UseC_-Telco-Customer-Churn.csv   # исходный датасет
+│   └── new_customers.csv                        # новые клиенты для предсказания
 ├── notebook/
-│   └── EDA.ipynb                                # exploratory analysis
+│   └── EDA.ipynb                                # разведочный анализ данных
 ├── scripts/
-│   ├── preprocessing.py                         # custom transformers
-│   ├── train.py                                 # full training pipeline
-│   └── predict.py                               # batch scoring
+│   ├── preprocessing.py                         # кастомные трансформеры
+│   ├── train.py                                 # обучение модели
+│   └── predict.py                               # предсказание на новых данных
 ├── results/
-│   ├── churn_pipeline.pkl                       # trained pipeline
-│   ├── threshold.json                           # decision threshold
-│   ├── predictions.csv                          # output from predict.py
+│   ├── churn_pipeline.pkl                       # обученная модель
+│   ├── threshold.json                           # порог срабатывания
+│   ├── predictions.csv                          # результаты predict.py
+│   ├── train_report.txt                         # отчёт об обучении
+│   ├── predict_report.txt                       # отчёт о предсказаниях
 │   └── plots/
-│       └── pr_curve.png                         # precision-recall curve
+│       └── pr_curve.png                         # кривая precision-recall
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## Feature Engineering
-
-Three features are created inside a custom `FeatureEngineer` sklearn transformer (first step of the pipeline), making them automatically available at inference time without data leakage:
-
-### `tenure_bucket`
-Bins continuous tenure (months) into `['0-12', '13-24', '25-48', '49+']`.  
-Churn risk is highest in the first year and drops sharply after two years — a non-linear relationship that tree models capture but that also helps linear models when represented as a categorical.
-
-### `charges_per_month`
-`TotalCharges / max(tenure, 1)`  
-Captures *effective* monthly spend, which differs from `MonthlyCharges` when promotions or mid-cycle changes occurred. It also normalises for the fact that new customers have very low `TotalCharges` simply because they haven't been billed many times yet.
-
-### `n_services` — the "No / No internet service" trap
-Counts how many of the nine service columns (`PhoneService`, `MultipleLines`, `InternetService`, `OnlineSecurity`, `OnlineBackup`, `DeviceProtection`, `TechSupport`, `StreamingTV`, `StreamingMovies`) are *active* for a customer.
-
-**The trap**: columns that depend on internet service (e.g. `OnlineSecurity`) are filled with the string `"No internet service"` — not `"No"` — for customers who have no internet plan. Treating both strings as equivalent "off" states prevents false inflation of service counts for non-internet customers.
-
----
-
-## How to Run
+## Как запустить
 
 ```bash
-# 1. Install dependencies
-python3 -m pip install -r requirements.txt
+# 1. Установить зависимости
+pip install -r requirements.txt
 
-# 2. Train the model (prints CV tables, saves pipeline & threshold)
+# 2. Обучить модель
 python3 scripts/train.py
 
-# 3. Score new customers
+# 3. Предсказать на новых клиентах
 python3 scripts/predict.py
 ```
 
+После `train.py` в папке `results/` появятся: обученная модель, порог, графики и `train_report.txt`.  
+После `predict.py` — `predictions.csv` и `predict_report.txt`.
+
 ---
 
-## CV Results (5-fold Stratified)
+## Почему не подходит обычная точность (accuracy)
 
-| Model | Recall | Precision | F1 | ROC-AUC |
+`DummyClassifier`, который всегда предсказывает «клиент не уйдёт», даёт **73.5% accuracy** — просто потому что 73.5% клиентов действительно не уходят. Но такая модель не найдёт ни одного реального уходящего — она бесполезна.
+
+Поэтому мы оптимизируем **recall** — долю реальных уходящих клиентов, которых модель смогла найти. Пропустить уходящего клиента обходится в 5 раз дороже лишнего звонка лояльному.
+
+---
+
+## Разработанные признаки
+
+Все три признака создаются внутри sklearn Pipeline через кастомный трансформер `FeatureEngineer` — это исключает утечку данных и гарантирует, что при предсказании они воспроизводятся автоматически.
+
+**`tenure_bucket`** — разбивает стаж клиента (в месяцах) на 4 группы: `0-12`, `13-24`, `25-48`, `49+`.  
+Новые клиенты уходят чаще — эта нелинейная зависимость лучше работает как категория, а не как число.
+
+**`charges_per_month`** — `TotalCharges / max(tenure, 1)`.  
+Показывает фактическую среднюю оплату в месяц. У новых клиентов `TotalCharges` маленький просто потому что они мало платили по времени — этот признак это учитывает.
+
+**`n_services`** — количество активных услуг клиента.  
+Ловушка: колонки вроде `OnlineSecurity` у клиентов без интернета содержат не `"No"`, а `"No internet service"`. Считать активной только услугу, значение которой не равно ни `"No"`, ни `"No internet service"` — иначе счётчик будет завышен.
+
+---
+
+## Сравнение моделей (5-fold Stratified CV)
+
+Обучающая выборка: **80% (5 634 записи)**, тестовая: 20% (1 409 записей).
+
+| Модель | Recall | Precision | F1 | ROC-AUC |
 |---|---|---|---|---|
-| LogisticRegression | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx |
-| RandomForest | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx |
-| GradientBoosting | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx | 0.xxx ± 0.xxx |
+| **LogisticRegression** ✅ | **79.7% ± 3.7%** | 51.6% ± 1.7% | 62.7% ± 2.2% | 84.6% ± 1.1% |
+| RandomForest | 47.8% ± 2.2% | 64.9% ± 2.6% | 55.0% ± 2.3% | 82.5% ± 1.1% |
+| GradientBoosting | 52.1% ± 2.9% | 66.7% ± 3.3% | 58.5% ± 2.5% | 84.8% ± 1.2% |
 
-*(Run `python scripts/train.py` to populate with actual values.)*
+**Выбрана LogisticRegression** — лучший recall (79.7%). Пропуск уходящего клиента стоит дороже лишнего звонка, поэтому выбираем по recall, а не по ROC-AUC.
 
----
-
-## Baseline & Why Accuracy is the Wrong Metric
-
-A `DummyClassifier(strategy='most_frequent')` always predicts "No Churn" and achieves **~73.5% accuracy** — better than many naive models on paper.
-
-However, accuracy is misleading for imbalanced classes:
-- It rewards predicting the majority class
-- It assigns equal cost to false positives and false negatives
-- In churn, **a missed churner (false negative) costs far more** than a wasted retention offer (false positive)
-
-We therefore optimise for **recall** (fraction of actual churners caught) subject to a minimum precision constraint, using threshold tuning on the precision-recall curve.
+LogisticRegression обучена с `class_weight='balanced'` — это компенсирует дисбаланс классов (73% / 27%), увеличивая штраф за пропуск редкого класса.
 
 ---
 
-## Threshold Tuning
+## Подбор порога (Threshold Tuning)
 
-Default classifiers use threshold = 0.5. We instead find the threshold on the precision-recall curve (estimated via `cross_val_predict` on the training set) where:
+По умолчанию sklearn использует порог 0.5. Мы подбираем его на кривой precision-recall по out-of-fold предсказаниям обучающей выборки (`cross_val_predict`).
 
-- **Recall ≥ 0.80** (catch at least 80% of churners)
-- **Precision is maximised** at that recall level
+Критерий: **recall ≥ 80%** при максимально возможной precision.
 
-Typical results on test set:
-- Recall ≥ 0.75
-- Precision ≥ 0.45
+Подобранный порог: **0.499**
 
----
-
-## Business Translation
-
-| Metric | Meaning in plain English |
-|---|---|
-| **Recall 0.75** | We correctly flag 3 out of every 4 customers who would have left |
-| **Precision 0.45** | Of every 10 customers we flag as at-risk, about 4-5 actually would have churned |
-| **ROC-AUC ~0.84** | Our model ranks a real churner ahead of a non-churner 84% of the time |
-
-A retention offer typically costs $20-50. The lifetime value of retaining a customer for one more year is several hundred dollars. Even at 45% precision the program has a positive expected ROI.
+Тест касается только один раз — после того как порог уже зафиксирован.
 
 ---
 
-## Results Summary
+## Результаты на тестовой выборке
 
-See [`results/results.md`](results/results.md) for a plain-language business summary.
+| Метрика | Значение | Требование |
+|---|---|---|
+| Recall (нашли уходящих) | **79%** | ≥ 75% ✅ |
+| Precision (точность флагов) | **50%** | ≥ 45% ✅ |
+| ROC-AUC | **84%** | > 50% ✅ |
+
+Из 374 реально ушедших клиентов модель поймала **296** — достаточно для эффективной работы отдела удержания.
+
+---
+
+## Подробные результаты
+
+См. [`results/results.md`](results/results.md) — объяснение результатов простым языком.
