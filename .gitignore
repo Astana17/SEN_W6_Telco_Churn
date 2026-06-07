@@ -10,7 +10,7 @@ venv/
 *.egg-info/
 
 # Generated data
-data/processed/
+# data/processed/
 
 # OS
 .DS_Store
