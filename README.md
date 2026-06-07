@@ -166,6 +166,8 @@ python scripts/train.py
 
 ```bash
 python scripts/predict.py
+
+python scripts/predict.py --test_mode )(так как я делала сплит по stratify y)
 ```
 
 ## Notes

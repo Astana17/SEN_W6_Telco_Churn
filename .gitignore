@@ -1,0 +1,28 @@
+cat > .gitignore << 'EOF'
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Data & Models (тяжёлые файлы — не коммитим)
+data/processed/
+results/
+models/
+*.pkl
+*.joblib
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+EOF
